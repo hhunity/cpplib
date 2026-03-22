@@ -346,12 +346,12 @@ int export_run_to_jsonl(const std::string& db_path,
 {
     using json = nlohmann::ordered_json;
 
-    // Open DB read-only (safe to call while AsyncSqliteLogger is writing in WAL mode).
     sqlite3* db = nullptr;
-    if (sqlite3_open_v2(db_path.c_str(), &db,
-                        SQLITE_OPEN_READONLY, nullptr) != SQLITE_OK) {
+    if (sqlite3_open(db_path.c_str(), &db) != SQLITE_OK) {
         return -1;
     }
+    // WAL mode: readers can run concurrently with the writer.
+    sqlite3_exec(db, "PRAGMA journal_mode=WAL;", nullptr, nullptr, nullptr);
 
     sqlite3_stmt* stmt = nullptr;
     const char* sql =
