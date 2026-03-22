@@ -232,6 +232,67 @@ struct ReadOptions {
 
 ## 他プロジェクトから使う
 
+### 方法1: git submodule（推奨）
+
+使う側のプロジェクトで：
+
+```sh
+git submodule add <cpplib の git URL> external/cpplib
+git submodule update --init
+```
+
+CMakeLists.txt に追加：
+
+```cmake
+add_subdirectory(external/cpplib)
+
+target_link_libraries(your_app PRIVATE db io)
+target_include_directories(your_app PRIVATE external/cpplib)
+```
+
+### 方法2: CMake FetchContent（clone 不要）
+
+CMakeLists.txt に追加：
+
+```cmake
+include(FetchContent)
+
+FetchContent_Declare(cpplib
+    GIT_REPOSITORY <cpplib の git URL>
+    GIT_TAG        main
+)
+FetchContent_MakeAvailable(cpplib)
+
+target_link_libraries(your_app PRIVATE db io)
+```
+
+configure 時に自動で clone されます。
+
+### 方法の比較
+
+| | submodule | FetchContent |
+|--|-----------|--------------|
+| バージョン管理 | コミット単位で固定 | TAG で固定可 |
+| 初回 clone | 手動 | 自動 |
+| オフライン作業 | ✅ | ❌（初回はネット必要） |
+
+### vcpkg の設定（使う側で必要）
+
+使う側のプロジェクトの `vcpkg.json` に以下を追加してください：
+
+```json
+{
+  "dependencies": [
+    "nlohmann-json",
+    "sqlite3",
+    "tiff",
+    "zlib"
+  ]
+}
+```
+
+### ビルド済みファイルをコピーして使う場合
+
 ビルド後、`out/release/` に必要なファイルがすべてまとまります。
 
 ```
@@ -239,17 +300,12 @@ out/release/
   libdb.dylib / db.dll / libdb.so
   libio.dylib / io.dll / libio.so
   include/
-    db/
-      logger.h
-    io/
-      tiff_io.h
-    util/
-      image_data.h
+    db/logger.h
+    io/tiff_io.h
+    util/image_data.h
 ```
 
-`out/release/` フォルダごと配布先にコピーしてください。
-
-### CMakeLists.txt の例
+`out/release/` フォルダごとコピーして使う側の CMakeLists.txt に追加：
 
 ```cmake
 set(CPPLIB_DIR "/path/to/cpplib/out/release")
