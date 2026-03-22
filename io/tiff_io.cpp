@@ -14,10 +14,13 @@ namespace tiff_io {
 // Helpers
 // ---------------------------------------------------------------------------
 
-// Number of worker threads: hardware concurrency, capped at 8.
-static int worker_count(uint32_t units) {
+// Number of worker threads.
+// max_threads == 0: use full hardware concurrency (no artificial cap).
+// max_threads  > 0: use at most that many threads.
+static int worker_count(uint32_t units, int max_threads = 0) {
     const int hw = static_cast<int>(std::thread::hardware_concurrency());
-    return std::max(1, std::min({hw, 8, static_cast<int>(units)}));
+    const int cap = (max_threads > 0) ? std::min(hw, max_threads) : hw;
+    return std::max(1, std::min(cap, static_cast<int>(units)));
 }
 
 // Run worker(thread_id) on nthreads threads (or inline when nthreads == 1).
@@ -72,14 +75,15 @@ static bool read_strips_8bit(const std::string& path, TIFF* tif,
                               uint32_t w, uint32_t h,
                               uint16_t photometric, uint16_t spp,
                               image_data& out,
-                              std::atomic<float>* progress) {
+                              std::atomic<float>* progress,
+                              int max_threads) {
     uint32_t rows_per_strip = h;
     TIFFGetFieldDefaulted(tif, TIFFTAG_ROWSPERSTRIP, &rows_per_strip);
     if (rows_per_strip == 0) rows_per_strip = h;
 
     const uint32_t  num_strips  = TIFFNumberOfStrips(tif);
     const tmsize_t  strip_bytes = TIFFStripSize(tif);
-    const int       nthreads    = worker_count(num_strips);
+    const int       nthreads    = worker_count(num_strips, max_threads);
 
     std::atomic<uint32_t> strips_done{0};
     std::atomic<bool>     had_error{false};
@@ -149,7 +153,8 @@ static bool read_tiles_8bit(const std::string& path, TIFF* tif,
                              uint32_t w, uint32_t h,
                              uint16_t photometric, uint16_t spp,
                              image_data& out,
-                             std::atomic<float>* progress) {
+                             std::atomic<float>* progress,
+                             int max_threads) {
     uint32_t tile_w = 0, tile_h = 0;
     TIFFGetField(tif, TIFFTAG_TILEWIDTH,  &tile_w);
     TIFFGetField(tif, TIFFTAG_TILELENGTH, &tile_h);
@@ -158,7 +163,7 @@ static bool read_tiles_8bit(const std::string& path, TIFF* tif,
     const uint32_t ntiles   = TIFFNumberOfTiles(tif);
     const uint32_t tiles_x  = (w + tile_w - 1) / tile_w;
     const tmsize_t tile_bytes = TIFFTileSize(tif);
-    const int      nthreads  = worker_count(ntiles);
+    const int      nthreads  = worker_count(ntiles, max_threads);
 
     std::atomic<uint32_t> tiles_done{0};
     std::atomic<bool>     had_error{false};
@@ -201,13 +206,14 @@ static bool read_tiles_8bit(const std::string& path, TIFF* tif,
 static bool read_strips_generic(const std::string& path, TIFF* tif,
                                  uint32_t w, uint32_t h,
                                  image_data& out,
-                                 std::atomic<float>* progress) {
+                                 std::atomic<float>* progress,
+                                 int max_threads) {
     uint32_t rows_per_strip = h;
     TIFFGetFieldDefaulted(tif, TIFFTAG_ROWSPERSTRIP, &rows_per_strip);
     if (rows_per_strip == 0) rows_per_strip = h;
 
     const uint32_t num_strips = TIFFNumberOfStrips(tif);
-    const int      nthreads   = worker_count(num_strips);
+    const int      nthreads   = worker_count(num_strips, max_threads);
 
     std::atomic<uint32_t> strips_done{0};
     std::atomic<bool>     had_error{false};
@@ -254,7 +260,8 @@ static bool read_strips_generic(const std::string& path, TIFF* tif,
 static bool read_tiles_generic(const std::string& path, TIFF* tif,
                                 uint32_t w, uint32_t h,
                                 image_data& out,
-                                std::atomic<float>* progress) {
+                                std::atomic<float>* progress,
+                                int max_threads) {
     uint32_t tile_w = 0, tile_h = 0;
     TIFFGetField(tif, TIFFTAG_TILEWIDTH,  &tile_w);
     TIFFGetField(tif, TIFFTAG_TILELENGTH, &tile_h);
@@ -262,7 +269,7 @@ static bool read_tiles_generic(const std::string& path, TIFF* tif,
 
     const uint32_t ntiles  = TIFFNumberOfTiles(tif);
     const uint32_t tiles_x = (w + tile_w - 1) / tile_w;
-    const int      nthreads = worker_count(ntiles);
+    const int      nthreads = worker_count(ntiles, max_threads);
 
     std::atomic<uint32_t> tiles_done{0};
     std::atomic<bool>     had_error{false};
@@ -312,7 +319,8 @@ static bool read_tiles_generic(const std::string& path, TIFF* tif,
 // Public API
 // ---------------------------------------------------------------------------
 
-bool read(const std::string& path, image_data& out, std::atomic<float>* progress) {
+bool read(const std::string& path, image_data& out, std::atomic<float>* progress,
+          const ReadOptions& opts) {
     TIFF* tif = TIFFOpen(path.c_str(), "r");
     if (!tif) {
         fprintf(stderr, "tiff_io::read: cannot open '%s'\n", path.c_str());
@@ -348,18 +356,19 @@ bool read(const std::string& path, image_data& out, std::atomic<float>* progress
                             (photometric == PHOTOMETRIC_RGB &&
                              (samples_per_pixel == 3 || samples_per_pixel == 4)));
 
+    const int mt = opts.max_threads;
     bool ok = false;
     if (fast_path) {
         ok = is_tiled
-            ? read_tiles_8bit(path, tif, w, h, photometric, samples_per_pixel, out, progress)
-            : read_strips_8bit(path, tif, w, h, photometric, samples_per_pixel, out, progress);
+            ? read_tiles_8bit(path, tif, w, h, photometric, samples_per_pixel, out, progress, mt)
+            : read_strips_8bit(path, tif, w, h, photometric, samples_per_pixel, out, progress, mt);
     }
 
     // Generic fallback: any format, any bit depth (1/2/4/16-bit, palette, CMYK, …)
     if (!ok) {
         ok = is_tiled
-            ? read_tiles_generic(path, tif, w, h, out, progress)
-            : read_strips_generic(path, tif, w, h, out, progress);
+            ? read_tiles_generic(path, tif, w, h, out, progress, mt)
+            : read_strips_generic(path, tif, w, h, out, progress, mt);
     }
 
     if (!ok)
