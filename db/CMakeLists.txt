@@ -2,7 +2,6 @@ add_library(db SHARED logger.cpp)
 
 target_compile_definitions(db PRIVATE DB_BUILD_DLL)
 
-# Project root as include dir so "#include "db/logger.h"" resolves correctly.
 target_include_directories(db PUBLIC ${CMAKE_SOURCE_DIR})
 
 target_link_libraries(db
@@ -10,4 +9,13 @@ target_link_libraries(db
         nlohmann_json::nlohmann_json
     PRIVATE
         unofficial::sqlite3::sqlite3
+)
+
+# Copy public header to out/<config>/include/ after build.
+add_custom_command(TARGET db POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E make_directory
+        "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/include/db"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        "${CMAKE_SOURCE_DIR}/db/logger.h"
+        "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/include/db/logger.h"
 )
