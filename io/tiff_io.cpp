@@ -404,7 +404,7 @@ bool write(const std::string& path, const image_data& img, const WriteOptions& o
     const uint32_t w       = static_cast<uint32_t>(img.width);
     const uint32_t h       = static_cast<uint32_t>(img.height);
     const uint32_t ts      = (opts.tile_size > 0) ? opts.tile_size : 512u;
-    const bool     is_gray = (opts.format == PixelFormat::gray);
+    const bool     is_gray = (opts.output_format == PixelFormat::gray);
     const uint32_t spp     = is_gray ? 1u : 4u;
 
     TIFF* tif = TIFFOpen(path.c_str(), "w");

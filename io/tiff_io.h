@@ -21,7 +21,7 @@ struct WriteOptions
 {
     uint32_t    tile_size         = 512;              // tile width and height in pixels (power-of-2 recommended); 0 = use default (512)
     int         compression_level = 6;                // zlib level: 1 = fastest, 9 = best ratio, 0 = none
-    PixelFormat format            = PixelFormat::rgba; // output pixel format
+    PixelFormat output_format     = PixelFormat::rgba; // output pixel format
     int         max_threads       = 0;                // 0 = hardware concurrency (no cap); positive = explicit limit
 };
 
