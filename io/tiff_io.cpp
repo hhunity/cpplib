@@ -628,10 +628,20 @@ bool write_flat(const std::string& path, const image_data& img,
         TIFFSetField(tif, TIFFTAG_EXTRASAMPLES, static_cast<uint16_t>(1), &extra_type);
     }
 
-    // Convert all pixels into one contiguous raw buffer.
+    // Use the source buffer directly when no format conversion is needed,
+    // otherwise convert into a temporary buffer.
+    const bool needs_conversion = (is_gray != (img.format == PixelFormat::gray));
     const size_t total_bytes = static_cast<size_t>(w) * h * spp;
-    std::vector<uint8_t> raw(total_bytes);
-    convert_pixels(img, raw.data(), 0, 0, w, h, w, w, is_gray, spp);
+
+    std::vector<uint8_t> converted;
+    const uint8_t* src_ptr = nullptr;
+    if (needs_conversion) {
+        converted.resize(total_bytes);
+        convert_pixels(img, converted.data(), 0, 0, w, h, w, w, is_gray, spp);
+        src_ptr = converted.data();
+    } else {
+        src_ptr = img.pixels.data();
+    }
 
     if (use_deflate) {
         // Compress the entire image as one block.
@@ -639,7 +649,7 @@ bool write_flat(const std::string& path, const image_data& img,
         std::vector<uint8_t> compressed(compressBound(raw_len));
         uLongf comp_size = static_cast<uLongf>(compressed.size());
         if (compress2(compressed.data(), &comp_size,
-                      raw.data(), raw_len, compression_level) != Z_OK) {
+                      src_ptr, raw_len, compression_level) != Z_OK) {
             fprintf(stderr, "tiff_io::write_flat: compression failed\n");
             TIFFClose(tif);
             return false;
@@ -651,7 +661,7 @@ bool write_flat(const std::string& path, const image_data& img,
             return false;
         }
     } else {
-        if (TIFFWriteRawStrip(tif, 0, raw.data(),
+        if (TIFFWriteRawStrip(tif, 0, const_cast<uint8_t*>(src_ptr),
                               static_cast<tmsize_t>(total_bytes)) < 0) {
             fprintf(stderr, "tiff_io::write_flat: failed to write image data\n");
             TIFFClose(tif);
