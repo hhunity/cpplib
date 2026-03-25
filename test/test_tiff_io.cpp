@@ -63,6 +63,33 @@ static bool run_test(const std::string& name,
     return true;
 }
 
+// Correctness test for write_flat.
+static bool run_test_flat(const std::string& name, int w, int h, int level = 0)
+{
+    const std::string path = name + ".tiff";
+    const image_data src = make_gradient(w, h);
+
+    if (!tiff_io::write_flat(path, src, level)) {
+        std::fprintf(stderr, "FAIL [%s] write_flat error\n", name.c_str());
+        return false;
+    }
+
+    image_data dst;
+    if (!tiff_io::read(path, dst)) {
+        std::fprintf(stderr, "FAIL [%s] read error\n", name.c_str());
+        return false;
+    }
+
+    if (!pixels_equal(src, dst)) {
+        std::fprintf(stderr, "FAIL [%s] pixel mismatch (%dx%d)\n",
+                     name.c_str(), w, h);
+        return false;
+    }
+
+    std::printf("PASS [%s] %dx%d (flat level=%d)\n", name.c_str(), w, h, level);
+    return true;
+}
+
 // ---------------------------------------------------------------------------
 // Write speed benchmark
 // ---------------------------------------------------------------------------
@@ -80,6 +107,21 @@ static void benchmark(int w, int h, const tiff_io::WriteOptions& opts)
     std::printf("BENCH %dx%d (%.1f MB) tile=%u level=%d -> %.1f ms  (%.0f MB/s)\n",
                 w, h, mb, opts.tile_size, opts.compression_level,
                 ms, mb / (ms / 1000.0));
+}
+
+static void benchmark_flat(int w, int h, int level)
+{
+    const image_data img = make_gradient(w, h);
+
+    auto t0 = std::chrono::high_resolution_clock::now();
+    tiff_io::write_flat("bench_flat.tiff", img, level);
+    auto t1 = std::chrono::high_resolution_clock::now();
+
+    const double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+    const double mb = static_cast<double>(w) * h * 4 / (1024.0 * 1024.0);
+    const char* label = (level == 0) ? "flat/no-compress" : "flat/deflate";
+    std::printf("BENCH %dx%d (%.1f MB) %s level=%d -> %.1f ms  (%.0f MB/s)\n",
+                w, h, mb, label, level, ms, mb / (ms / 1000.0));
 }
 
 // ---------------------------------------------------------------------------
@@ -110,6 +152,16 @@ int main()
     failed += !run_test("t_level1",   512,  512, {.compression_level = 1});
     failed += !run_test("t_level9",   512,  512, {.compression_level = 9});
 
+    // Flat, no compression
+    failed += !run_test_flat("t_flat_nc_512x512",  512,  512, 0);
+    failed += !run_test_flat("t_flat_nc_300x200",  300,  200, 0);
+    failed += !run_test_flat("t_flat_nc_1x1",        1,    1, 0);
+
+    // Flat, with DEFLATE (single-block compression)
+    failed += !run_test_flat("t_flat_l1_512x512",  512,  512, 1);
+    failed += !run_test_flat("t_flat_l6_512x512",  512,  512, 6);
+    failed += !run_test_flat("t_flat_l6_300x200",  300,  200, 6);
+
     std::printf("\n%s  (%d test(s) failed)\n",
                 failed == 0 ? "ALL PASSED" : "SOME FAILED", failed);
 
@@ -119,6 +171,8 @@ int main()
     benchmark(4096, 4096, {.tile_size = 256, .compression_level = 6});
     benchmark(4096, 4096, {.tile_size = 256, .compression_level = 9});
     benchmark(4096, 4096, {.tile_size = 512, .compression_level = 6});
+    benchmark_flat(4096, 4096, 0);  // no compression, baseline
+    benchmark_flat(4096, 4096, 6);  // deflate level 6, single block
 
     return failed == 0 ? 0 : 1;
 }
