@@ -16,11 +16,17 @@
 
 namespace tiff_io {
 
+enum class PixelFormat {
+    rgba, // 4 channels, 8-bit per channel (default)
+    gray, // 1 channel, 8-bit (luminance-weighted conversion from RGBA)
+};
+
 // Options for write().  All fields have sensible defaults.
 struct WriteOptions
 {
-    uint32_t tile_size         = 512; // tile width and height in pixels (power-of-2 recommended)
-    int      compression_level = 6;   // zlib level: 1 = fastest, 9 = best ratio, 0 = none
+    uint32_t    tile_size         = 512;             // tile width and height in pixels (power-of-2 recommended)
+    int         compression_level = 6;               // zlib level: 1 = fastest, 9 = best ratio, 0 = none
+    PixelFormat format            = PixelFormat::rgba;
 };
 
 // Options for read().  All fields have sensible defaults.

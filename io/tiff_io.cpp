@@ -381,9 +381,11 @@ bool read(const std::string& path, image_data& out, std::atomic<float>* progress
 bool write(const std::string& path, const image_data& img, const WriteOptions& opts) {
     if (img.empty()) return false;
 
-    const uint32_t w  = static_cast<uint32_t>(img.width);
-    const uint32_t h  = static_cast<uint32_t>(img.height);
-    const uint32_t ts = opts.tile_size;
+    const uint32_t w       = static_cast<uint32_t>(img.width);
+    const uint32_t h       = static_cast<uint32_t>(img.height);
+    const uint32_t ts      = opts.tile_size;
+    const bool     is_gray = (opts.format == PixelFormat::gray);
+    const uint32_t spp     = is_gray ? 1u : 4u;
 
     TIFF* tif = TIFFOpen(path.c_str(), "w");
     if (!tif) {
@@ -393,21 +395,23 @@ bool write(const std::string& path, const image_data& img, const WriteOptions& o
 
     TIFFSetField(tif, TIFFTAG_IMAGEWIDTH,      w);
     TIFFSetField(tif, TIFFTAG_IMAGELENGTH,     h);
-    TIFFSetField(tif, TIFFTAG_SAMPLESPERPIXEL, static_cast<uint16_t>(4));
+    TIFFSetField(tif, TIFFTAG_SAMPLESPERPIXEL, static_cast<uint16_t>(spp));
     TIFFSetField(tif, TIFFTAG_BITSPERSAMPLE,   static_cast<uint16_t>(8));
     TIFFSetField(tif, TIFFTAG_ORIENTATION,     ORIENTATION_TOPLEFT);
     TIFFSetField(tif, TIFFTAG_PLANARCONFIG,    PLANARCONFIG_CONTIG);
-    TIFFSetField(tif, TIFFTAG_PHOTOMETRIC,     PHOTOMETRIC_RGB);
+    TIFFSetField(tif, TIFFTAG_PHOTOMETRIC,     is_gray ? PHOTOMETRIC_MINISBLACK : PHOTOMETRIC_RGB);
     TIFFSetField(tif, TIFFTAG_TILEWIDTH,       ts);
     TIFFSetField(tif, TIFFTAG_TILELENGTH,      ts);
     TIFFSetField(tif, TIFFTAG_COMPRESSION,     COMPRESSION_ADOBE_DEFLATE);
 
-    uint16_t extra_type = EXTRASAMPLE_UNASSALPHA;
-    TIFFSetField(tif, TIFFTAG_EXTRASAMPLES, static_cast<uint16_t>(1), &extra_type);
+    if (!is_gray) {
+        uint16_t extra_type = EXTRASAMPLE_UNASSALPHA;
+        TIFFSetField(tif, TIFFTAG_EXTRASAMPLES, static_cast<uint16_t>(1), &extra_type);
+    }
 
-    const uint32_t tiles_x = (w + ts - 1) / ts;
-    const uint32_t tiles_y = (h + ts - 1) / ts;
-    const uint32_t ntiles  = tiles_x * tiles_y;
+    const uint32_t tiles_x  = (w + ts - 1) / ts;
+    const uint32_t tiles_y  = (h + ts - 1) / ts;
+    const uint32_t ntiles   = tiles_x * tiles_y;
     const int      nthreads = worker_count(ntiles);
 
     // Per-tile compressed buffers (populated in parallel).
@@ -429,11 +433,26 @@ bool write(const std::string& path, const image_data& img, const WriteOptions& o
             const uint32_t copy_w = std::min(ts, w - tx);
             const uint32_t copy_h = std::min(ts, h - ty);
 
-            // Copy pixels into a full-tile buffer (zero-padded for partial edge tiles).
-            std::vector<uint8_t> raw(static_cast<size_t>(ts) * ts * 4, 0);
-            for (uint32_t r = 0; r < copy_h; ++r) {
-                const uint8_t* src = img.pixels.data() + (ty + r) * w * 4 + tx * 4;
-                std::memcpy(raw.data() + r * ts * 4, src, copy_w * 4);
+            std::vector<uint8_t> raw(static_cast<size_t>(ts) * ts * spp, 0);
+
+            if (is_gray) {
+                // Luminance-weighted conversion: Y = 0.299R + 0.587G + 0.114B
+                for (uint32_t r = 0; r < copy_h; ++r) {
+                    const uint8_t* src = img.pixels.data() + (ty + r) * w * 4 + tx * 4;
+                    uint8_t*       dst = raw.data() + r * ts;
+                    for (uint32_t x = 0; x < copy_w; ++x) {
+                        dst[x] = static_cast<uint8_t>(
+                            src[x*4+0] * 0.299f +
+                            src[x*4+1] * 0.587f +
+                            src[x*4+2] * 0.114f + 0.5f);
+                    }
+                }
+            } else {
+                // Copy RGBA as-is.
+                for (uint32_t r = 0; r < copy_h; ++r) {
+                    const uint8_t* src = img.pixels.data() + (ty + r) * w * 4 + tx * 4;
+                    std::memcpy(raw.data() + r * ts * 4, src, copy_w * 4);
+                }
             }
 
             // Compress with zlib (produces the same format libTIFF DEFLATE expects).
