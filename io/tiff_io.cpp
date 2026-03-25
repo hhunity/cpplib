@@ -371,11 +371,31 @@ bool read(const std::string& path, image_data& out, std::atomic<float>* progress
             : read_strips_generic(path, tif, w, h, out, progress, mt);
     }
 
-    if (!ok)
+    if (!ok) {
         fprintf(stderr, "tiff_io::read: failed to decode '%s'\n", path.c_str());
+        TIFFClose(tif);
+        return false;
+    }
 
     TIFFClose(tif);
-    return ok;
+
+    // Convert to the requested output format.
+    if (opts.output_format == PixelFormat::gray) {
+        const size_t npixels = static_cast<size_t>(w) * h;
+        std::vector<uint8_t> gray_pixels(npixels);
+        for (size_t i = 0; i < npixels; ++i) {
+            gray_pixels[i] = static_cast<uint8_t>(
+                out.pixels[i*4+0] * 0.299f +
+                out.pixels[i*4+1] * 0.587f +
+                out.pixels[i*4+2] * 0.114f + 0.5f);
+        }
+        out.pixels = std::move(gray_pixels);
+        out.format = PixelFormat::gray;
+    } else {
+        out.format = PixelFormat::rgba;
+    }
+
+    return true;
 }
 
 bool write(const std::string& path, const image_data& img, const WriteOptions& opts) {
@@ -436,22 +456,43 @@ bool write(const std::string& path, const image_data& img, const WriteOptions& o
             std::vector<uint8_t> raw(static_cast<size_t>(ts) * ts * spp, 0);
 
             if (is_gray) {
-                // Luminance-weighted conversion: Y = 0.299R + 0.587G + 0.114B
-                for (uint32_t r = 0; r < copy_h; ++r) {
-                    const uint8_t* src = img.pixels.data() + (ty + r) * w * 4 + tx * 4;
-                    uint8_t*       dst = raw.data() + r * ts;
-                    for (uint32_t x = 0; x < copy_w; ++x) {
-                        dst[x] = static_cast<uint8_t>(
-                            src[x*4+0] * 0.299f +
-                            src[x*4+1] * 0.587f +
-                            src[x*4+2] * 0.114f + 0.5f);
+                if (img.format == PixelFormat::gray) {
+                    // gray -> gray: direct copy
+                    for (uint32_t r = 0; r < copy_h; ++r) {
+                        const uint8_t* src = img.pixels.data() + (ty + r) * w + tx;
+                        std::memcpy(raw.data() + r * ts, src, copy_w);
+                    }
+                } else {
+                    // rgba -> gray: luminance-weighted conversion
+                    for (uint32_t r = 0; r < copy_h; ++r) {
+                        const uint8_t* src = img.pixels.data() + (ty + r) * w * 4 + tx * 4;
+                        uint8_t*       dst = raw.data() + r * ts;
+                        for (uint32_t x = 0; x < copy_w; ++x) {
+                            dst[x] = static_cast<uint8_t>(
+                                src[x*4+0] * 0.299f +
+                                src[x*4+1] * 0.587f +
+                                src[x*4+2] * 0.114f + 0.5f);
+                        }
                     }
                 }
             } else {
-                // Copy RGBA as-is.
-                for (uint32_t r = 0; r < copy_h; ++r) {
-                    const uint8_t* src = img.pixels.data() + (ty + r) * w * 4 + tx * 4;
-                    std::memcpy(raw.data() + r * ts * 4, src, copy_w * 4);
+                if (img.format == PixelFormat::gray) {
+                    // gray -> rgba: expand to (v,v,v,255)
+                    for (uint32_t r = 0; r < copy_h; ++r) {
+                        const uint8_t* src = img.pixels.data() + (ty + r) * w + tx;
+                        uint8_t*       dst = raw.data() + r * ts * 4;
+                        for (uint32_t x = 0; x < copy_w; ++x) {
+                            const uint8_t v = src[x];
+                            dst[x*4+0] = v; dst[x*4+1] = v;
+                            dst[x*4+2] = v; dst[x*4+3] = 255;
+                        }
+                    }
+                } else {
+                    // rgba -> rgba: direct copy
+                    for (uint32_t r = 0; r < copy_h; ++r) {
+                        const uint8_t* src = img.pixels.data() + (ty + r) * w * 4 + tx * 4;
+                        std::memcpy(raw.data() + r * ts * 4, src, copy_w * 4);
+                    }
                 }
             }
 
