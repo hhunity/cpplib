@@ -403,7 +403,7 @@ bool write(const std::string& path, const image_data& img, const WriteOptions& o
 
     const uint32_t w       = static_cast<uint32_t>(img.width);
     const uint32_t h       = static_cast<uint32_t>(img.height);
-    const uint32_t ts      = opts.tile_size;
+    const uint32_t ts      = (opts.tile_size > 0) ? opts.tile_size : 512u;
     const bool     is_gray = (opts.format == PixelFormat::gray);
     const uint32_t spp     = is_gray ? 1u : 4u;
 
@@ -432,7 +432,7 @@ bool write(const std::string& path, const image_data& img, const WriteOptions& o
     const uint32_t tiles_x  = (w + ts - 1) / ts;
     const uint32_t tiles_y  = (h + ts - 1) / ts;
     const uint32_t ntiles   = tiles_x * tiles_y;
-    const int      nthreads = worker_count(ntiles);
+    const int      nthreads = worker_count(ntiles, opts.max_threads);
 
     // Per-tile compressed buffers (populated in parallel).
     struct TileBuf {
