@@ -554,22 +554,32 @@ bool write(const std::string& path, const image_data& img, const WriteOptions& o
 
         std::vector<SegBuf> segs(nstrips);
 
+        const bool needs_conversion = (is_gray != (img.format == PixelFormat::gray));
+
         parallel_for(nthreads, [&](int tid) {
-            std::vector<uint8_t> raw(static_cast<size_t>(w) * rps * spp);
+            std::vector<uint8_t> converted;
+            if (needs_conversion)
+                converted.resize(static_cast<size_t>(w) * rps * spp);
+
             for (uint32_t s = static_cast<uint32_t>(tid); s < nstrips; s += nthreads) {
                 if (had_error.load()) break;
 
                 const uint32_t row0   = s * rps;
                 const uint32_t copy_h = std::min(rps, h - row0);
+                const uLong    raw_len = static_cast<uLong>(static_cast<size_t>(w) * copy_h * spp);
 
-                std::fill(raw.begin(), raw.end(), 0);
-                convert_pixels(img, raw.data(), 0, row0, w, copy_h, w, w, is_gray, spp);
+                const uint8_t* src_ptr;
+                if (needs_conversion) {
+                    convert_pixels(img, converted.data(), 0, row0, w, copy_h, w, w, is_gray, spp);
+                    src_ptr = converted.data();
+                } else {
+                    src_ptr = img.pixels.data() + static_cast<size_t>(row0) * w * spp;
+                }
 
-                const uLong raw_len = static_cast<uLong>(static_cast<size_t>(w) * copy_h * spp);
                 segs[s].data.resize(compressBound(raw_len));
                 segs[s].size = static_cast<uLongf>(segs[s].data.size());
                 segs[s].ok = (compress2(segs[s].data.data(), &segs[s].size,
-                                        raw.data(), raw_len,
+                                        src_ptr, raw_len,
                                         opts.compression_level) == Z_OK);
                 if (!segs[s].ok) had_error.store(true);
             }
