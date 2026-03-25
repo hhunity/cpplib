@@ -398,12 +398,66 @@ bool read(const std::string& path, image_data& out, std::atomic<float>* progress
     return true;
 }
 
+// ---------------------------------------------------------------------------
+// Pixel conversion helper used by both tile and strip write paths.
+// Converts a rectangular region of img into a contiguous raw buffer.
+// For tiled layout, row_stride is ts (tile width); for strip layout, row_stride is w.
+// ---------------------------------------------------------------------------
+static void convert_pixels(const image_data& img,
+                            uint8_t* raw,
+                            uint32_t src_x, uint32_t src_y,
+                            uint32_t copy_w, uint32_t copy_h,
+                            uint32_t w, uint32_t row_stride,
+                            bool is_gray, uint32_t spp) {
+    if (is_gray) {
+        if (img.format == PixelFormat::gray) {
+            for (uint32_t r = 0; r < copy_h; ++r) {
+                const uint8_t* src = img.pixels.data() + (src_y + r) * w + src_x;
+                std::memcpy(raw + r * row_stride, src, copy_w);
+            }
+        } else {
+            for (uint32_t r = 0; r < copy_h; ++r) {
+                const uint8_t* src = img.pixels.data() + (src_y + r) * w * 4 + src_x * 4;
+                uint8_t*       dst = raw + r * row_stride;
+                for (uint32_t x = 0; x < copy_w; ++x) {
+                    dst[x] = static_cast<uint8_t>(
+                        src[x*4+0] * 0.299f +
+                        src[x*4+1] * 0.587f +
+                        src[x*4+2] * 0.114f + 0.5f);
+                }
+            }
+        }
+    } else {
+        if (img.format == PixelFormat::gray) {
+            for (uint32_t r = 0; r < copy_h; ++r) {
+                const uint8_t* src = img.pixels.data() + (src_y + r) * w + src_x;
+                uint8_t*       dst = raw + r * row_stride * spp;
+                for (uint32_t x = 0; x < copy_w; ++x) {
+                    const uint8_t v = src[x];
+                    dst[x*4+0] = v; dst[x*4+1] = v;
+                    dst[x*4+2] = v; dst[x*4+3] = 255;
+                }
+            }
+        } else {
+            for (uint32_t r = 0; r < copy_h; ++r) {
+                const uint8_t* src = img.pixels.data() + (src_y + r) * w * 4 + src_x * 4;
+                std::memcpy(raw + r * row_stride * spp, src, copy_w * spp);
+            }
+        }
+    }
+}
+
 bool write(const std::string& path, const image_data& img, const WriteOptions& opts) {
     if (img.empty()) return false;
 
+    const uint32_t ts = opts.tile_size;
+    if (ts > 0 && (ts < 16 || ts % 16 != 0)) {
+        fprintf(stderr, "tiff_io::write: tile_size must be 0 (strip) or a multiple of 16 (got %u)\n", ts);
+        return false;
+    }
+
     const uint32_t w       = static_cast<uint32_t>(img.width);
     const uint32_t h       = static_cast<uint32_t>(img.height);
-    const uint32_t ts      = (opts.tile_size > 0) ? opts.tile_size : 512u;
     const bool     is_gray = (opts.output_format == PixelFormat::gray);
     const uint32_t spp     = is_gray ? 1u : 4u;
 
@@ -420,8 +474,6 @@ bool write(const std::string& path, const image_data& img, const WriteOptions& o
     TIFFSetField(tif, TIFFTAG_ORIENTATION,     ORIENTATION_TOPLEFT);
     TIFFSetField(tif, TIFFTAG_PLANARCONFIG,    PLANARCONFIG_CONTIG);
     TIFFSetField(tif, TIFFTAG_PHOTOMETRIC,     is_gray ? PHOTOMETRIC_MINISBLACK : PHOTOMETRIC_RGB);
-    TIFFSetField(tif, TIFFTAG_TILEWIDTH,       ts);
-    TIFFSetField(tif, TIFFTAG_TILELENGTH,      ts);
     TIFFSetField(tif, TIFFTAG_COMPRESSION,     COMPRESSION_ADOBE_DEFLATE);
 
     if (!is_gray) {
@@ -429,99 +481,114 @@ bool write(const std::string& path, const image_data& img, const WriteOptions& o
         TIFFSetField(tif, TIFFTAG_EXTRASAMPLES, static_cast<uint16_t>(1), &extra_type);
     }
 
-    const uint32_t tiles_x  = (w + ts - 1) / ts;
-    const uint32_t tiles_y  = (h + ts - 1) / ts;
-    const uint32_t ntiles   = tiles_x * tiles_y;
-    const int      nthreads = worker_count(ntiles, opts.max_threads);
-
-    // Per-tile compressed buffers (populated in parallel).
-    struct TileBuf {
+    // Compressed segment buffer used by both paths.
+    struct SegBuf {
         std::vector<uint8_t> data;
         uLongf               size = 0;
         bool                 ok   = false;
     };
-    std::vector<TileBuf> tiles(ntiles);
 
     std::atomic<bool> had_error{false};
 
-    parallel_for(nthreads, [&](int tid) {
-        for (uint32_t t = static_cast<uint32_t>(tid); t < ntiles; t += nthreads) {
-            if (had_error.load()) break;
+    if (ts > 0) {
+        // ----------------------------------------------------------------
+        // Tiled layout
+        // ----------------------------------------------------------------
+        TIFFSetField(tif, TIFFTAG_TILEWIDTH,  ts);
+        TIFFSetField(tif, TIFFTAG_TILELENGTH, ts);
 
-            const uint32_t tx     = (t % tiles_x) * ts;
-            const uint32_t ty     = (t / tiles_x) * ts;
-            const uint32_t copy_w = std::min(ts, w - tx);
-            const uint32_t copy_h = std::min(ts, h - ty);
+        const uint32_t tiles_x  = (w + ts - 1) / ts;
+        const uint32_t tiles_y  = (h + ts - 1) / ts;
+        const uint32_t ntiles   = tiles_x * tiles_y;
+        const int      nthreads = worker_count(ntiles, opts.max_threads);
 
+        std::vector<SegBuf> segs(ntiles);
+
+        parallel_for(nthreads, [&](int tid) {
             std::vector<uint8_t> raw(static_cast<size_t>(ts) * ts * spp, 0);
+            for (uint32_t t = static_cast<uint32_t>(tid); t < ntiles; t += nthreads) {
+                if (had_error.load()) break;
 
-            if (is_gray) {
-                if (img.format == PixelFormat::gray) {
-                    // gray -> gray: direct copy
-                    for (uint32_t r = 0; r < copy_h; ++r) {
-                        const uint8_t* src = img.pixels.data() + (ty + r) * w + tx;
-                        std::memcpy(raw.data() + r * ts, src, copy_w);
-                    }
-                } else {
-                    // rgba -> gray: luminance-weighted conversion
-                    for (uint32_t r = 0; r < copy_h; ++r) {
-                        const uint8_t* src = img.pixels.data() + (ty + r) * w * 4 + tx * 4;
-                        uint8_t*       dst = raw.data() + r * ts;
-                        for (uint32_t x = 0; x < copy_w; ++x) {
-                            dst[x] = static_cast<uint8_t>(
-                                src[x*4+0] * 0.299f +
-                                src[x*4+1] * 0.587f +
-                                src[x*4+2] * 0.114f + 0.5f);
-                        }
-                    }
-                }
-            } else {
-                if (img.format == PixelFormat::gray) {
-                    // gray -> rgba: expand to (v,v,v,255)
-                    for (uint32_t r = 0; r < copy_h; ++r) {
-                        const uint8_t* src = img.pixels.data() + (ty + r) * w + tx;
-                        uint8_t*       dst = raw.data() + r * ts * 4;
-                        for (uint32_t x = 0; x < copy_w; ++x) {
-                            const uint8_t v = src[x];
-                            dst[x*4+0] = v; dst[x*4+1] = v;
-                            dst[x*4+2] = v; dst[x*4+3] = 255;
-                        }
-                    }
-                } else {
-                    // rgba -> rgba: direct copy
-                    for (uint32_t r = 0; r < copy_h; ++r) {
-                        const uint8_t* src = img.pixels.data() + (ty + r) * w * 4 + tx * 4;
-                        std::memcpy(raw.data() + r * ts * 4, src, copy_w * 4);
-                    }
-                }
+                const uint32_t tx     = (t % tiles_x) * ts;
+                const uint32_t ty     = (t / tiles_x) * ts;
+                const uint32_t copy_w = std::min(ts, w - tx);
+                const uint32_t copy_h = std::min(ts, h - ty);
+
+                std::fill(raw.begin(), raw.end(), 0);
+                convert_pixels(img, raw.data(), tx, ty, copy_w, copy_h, w, ts, is_gray, spp);
+
+                const uLong raw_len = static_cast<uLong>(raw.size());
+                segs[t].data.resize(compressBound(raw_len));
+                segs[t].size = static_cast<uLongf>(segs[t].data.size());
+                segs[t].ok = (compress2(segs[t].data.data(), &segs[t].size,
+                                        raw.data(), raw_len,
+                                        opts.compression_level) == Z_OK);
+                if (!segs[t].ok) had_error.store(true);
             }
+        });
 
-            // Compress with zlib (produces the same format libTIFF DEFLATE expects).
-            const uLong raw_len = static_cast<uLong>(raw.size());
-            tiles[t].data.resize(compressBound(raw_len));
-            tiles[t].size = static_cast<uLongf>(tiles[t].data.size());
-            const int ret = compress2(tiles[t].data.data(), &tiles[t].size,
-                                      raw.data(), raw_len,
-                                      opts.compression_level);
-            tiles[t].ok = (ret == Z_OK);
-            if (!tiles[t].ok) had_error.store(true);
-        }
-    });
-
-    if (had_error.load()) {
-        fprintf(stderr, "tiff_io::write: compression failed\n");
-        TIFFClose(tif);
-        return false;
-    }
-
-    // Write compressed tiles sequentially (libTIFF is not thread-safe for writing).
-    for (uint32_t t = 0; t < ntiles; ++t) {
-        if (TIFFWriteRawTile(tif, t,
-                             tiles[t].data.data(),
-                             static_cast<tmsize_t>(tiles[t].size)) < 0) {
-            fprintf(stderr, "tiff_io::write: failed to write tile %u\n", t);
+        if (had_error.load()) {
+            fprintf(stderr, "tiff_io::write: compression failed\n");
             TIFFClose(tif);
             return false;
+        }
+
+        for (uint32_t t = 0; t < ntiles; ++t) {
+            if (TIFFWriteRawTile(tif, t,
+                                 segs[t].data.data(),
+                                 static_cast<tmsize_t>(segs[t].size)) < 0) {
+                fprintf(stderr, "tiff_io::write: failed to write tile %u\n", t);
+                TIFFClose(tif);
+                return false;
+            }
+        }
+    } else {
+        // ----------------------------------------------------------------
+        // Strip layout (tile_size == 0)
+        // ----------------------------------------------------------------
+        const uint32_t rps      = (opts.rows_per_strip > 0) ? opts.rows_per_strip : 64u;
+        const uint32_t nstrips  = (h + rps - 1) / rps;
+        const int      nthreads = worker_count(nstrips, opts.max_threads);
+
+        TIFFSetField(tif, TIFFTAG_ROWSPERSTRIP, rps);
+
+        std::vector<SegBuf> segs(nstrips);
+
+        parallel_for(nthreads, [&](int tid) {
+            std::vector<uint8_t> raw(static_cast<size_t>(w) * rps * spp);
+            for (uint32_t s = static_cast<uint32_t>(tid); s < nstrips; s += nthreads) {
+                if (had_error.load()) break;
+
+                const uint32_t row0   = s * rps;
+                const uint32_t copy_h = std::min(rps, h - row0);
+
+                std::fill(raw.begin(), raw.end(), 0);
+                convert_pixels(img, raw.data(), 0, row0, w, copy_h, w, w, is_gray, spp);
+
+                const uLong raw_len = static_cast<uLong>(static_cast<size_t>(w) * copy_h * spp);
+                segs[s].data.resize(compressBound(raw_len));
+                segs[s].size = static_cast<uLongf>(segs[s].data.size());
+                segs[s].ok = (compress2(segs[s].data.data(), &segs[s].size,
+                                        raw.data(), raw_len,
+                                        opts.compression_level) == Z_OK);
+                if (!segs[s].ok) had_error.store(true);
+            }
+        });
+
+        if (had_error.load()) {
+            fprintf(stderr, "tiff_io::write: compression failed\n");
+            TIFFClose(tif);
+            return false;
+        }
+
+        for (uint32_t s = 0; s < nstrips; ++s) {
+            if (TIFFWriteRawStrip(tif, s,
+                                  segs[s].data.data(),
+                                  static_cast<tmsize_t>(segs[s].size)) < 0) {
+                fprintf(stderr, "tiff_io::write: failed to write strip %u\n", s);
+                TIFFClose(tif);
+                return false;
+            }
         }
     }
 
