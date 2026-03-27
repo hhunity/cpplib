@@ -63,14 +63,19 @@ static bool run_test(const std::string& name,
     return true;
 }
 
-// Correctness test for write_flat.
+// Correctness test for single-strip (flat) write via write().
 static bool run_test_flat(const std::string& name, int w, int h, int level = 0)
 {
     const std::string path = name + ".tiff";
     const image_data src = make_gradient(w, h);
 
-    if (!tiff_io::write_flat(path, src, level)) {
-        std::fprintf(stderr, "FAIL [%s] write_flat error\n", name.c_str());
+    const tiff_io::WriteOptions opts{
+        .tile_size         = 0,
+        .compression_level = level,
+        .rows_per_strip    = static_cast<uint32_t>(h),
+    };
+    if (!tiff_io::write(path, src, opts)) {
+        std::fprintf(stderr, "FAIL [%s] write error\n", name.c_str());
         return false;
     }
 
@@ -111,17 +116,11 @@ static void benchmark(int w, int h, const tiff_io::WriteOptions& opts)
 
 static void benchmark_flat(int w, int h, int level)
 {
-    const image_data img = make_gradient(w, h);
-
-    auto t0 = std::chrono::high_resolution_clock::now();
-    tiff_io::write_flat("bench_flat.tiff", img, level);
-    auto t1 = std::chrono::high_resolution_clock::now();
-
-    const double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
-    const double mb = static_cast<double>(w) * h * 4 / (1024.0 * 1024.0);
-    const char* label = (level == 0) ? "flat/no-compress" : "flat/deflate";
-    std::printf("BENCH %dx%d (%.1f MB) %s level=%d -> %.1f ms  (%.0f MB/s)\n",
-                w, h, mb, label, level, ms, mb / (ms / 1000.0));
+    benchmark(w, h, {
+        .tile_size         = 0,
+        .compression_level = level,
+        .rows_per_strip    = static_cast<uint32_t>(h),
+    });
 }
 
 // ---------------------------------------------------------------------------

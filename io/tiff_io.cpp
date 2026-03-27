@@ -474,7 +474,9 @@ bool write(const std::string& path, const image_data& img, const WriteOptions& o
     TIFFSetField(tif, TIFFTAG_ORIENTATION,     ORIENTATION_TOPLEFT);
     TIFFSetField(tif, TIFFTAG_PLANARCONFIG,    PLANARCONFIG_CONTIG);
     TIFFSetField(tif, TIFFTAG_PHOTOMETRIC,     is_gray ? PHOTOMETRIC_MINISBLACK : PHOTOMETRIC_RGB);
-    TIFFSetField(tif, TIFFTAG_COMPRESSION,     COMPRESSION_ADOBE_DEFLATE);
+    TIFFSetField(tif, TIFFTAG_COMPRESSION,     opts.compression_level > 0
+                                                   ? COMPRESSION_ADOBE_DEFLATE
+                                                   : COMPRESSION_NONE);
 
     if (!is_gray) {
         uint16_t extra_type = EXTRASAMPLE_UNASSALPHA;
@@ -518,11 +520,17 @@ bool write(const std::string& path, const image_data& img, const WriteOptions& o
                 convert_pixels(img, raw.data(), tx, ty, copy_w, copy_h, w, ts, is_gray, spp);
 
                 const uLong raw_len = static_cast<uLong>(raw.size());
-                segs[t].data.resize(compressBound(raw_len));
-                segs[t].size = static_cast<uLongf>(segs[t].data.size());
-                segs[t].ok = (compress2(segs[t].data.data(), &segs[t].size,
-                                        raw.data(), raw_len,
-                                        opts.compression_level) == Z_OK);
+                if (opts.compression_level > 0) {
+                    segs[t].data.resize(compressBound(raw_len));
+                    segs[t].size = static_cast<uLongf>(segs[t].data.size());
+                    segs[t].ok = (compress2(segs[t].data.data(), &segs[t].size,
+                                            raw.data(), raw_len,
+                                            opts.compression_level) == Z_OK);
+                } else {
+                    segs[t].data.assign(raw.begin(), raw.end());
+                    segs[t].size = raw_len;
+                    segs[t].ok   = true;
+                }
                 if (!segs[t].ok) had_error.store(true);
             }
         });
@@ -576,11 +584,17 @@ bool write(const std::string& path, const image_data& img, const WriteOptions& o
                     src_ptr = img.pixels.data() + static_cast<size_t>(row0) * w * spp;
                 }
 
-                segs[s].data.resize(compressBound(raw_len));
-                segs[s].size = static_cast<uLongf>(segs[s].data.size());
-                segs[s].ok = (compress2(segs[s].data.data(), &segs[s].size,
-                                        src_ptr, raw_len,
-                                        opts.compression_level) == Z_OK);
+                if (opts.compression_level > 0) {
+                    segs[s].data.resize(compressBound(raw_len));
+                    segs[s].size = static_cast<uLongf>(segs[s].data.size());
+                    segs[s].ok = (compress2(segs[s].data.data(), &segs[s].size,
+                                            src_ptr, raw_len,
+                                            opts.compression_level) == Z_OK);
+                } else {
+                    segs[s].data.assign(src_ptr, src_ptr + raw_len);
+                    segs[s].size = raw_len;
+                    segs[s].ok   = true;
+                }
                 if (!segs[s].ok) had_error.store(true);
             }
         });
@@ -606,81 +620,5 @@ bool write(const std::string& path, const image_data& img, const WriteOptions& o
     return true;
 }
 
-bool write_flat(const std::string& path, const image_data& img,
-                int compression_level, PixelFormat output_format) {
-    if (img.empty()) return false;
-
-    const uint32_t w         = static_cast<uint32_t>(img.width);
-    const uint32_t h         = static_cast<uint32_t>(img.height);
-    const bool     is_gray   = (output_format == PixelFormat::gray);
-    const uint32_t spp       = is_gray ? 1u : 4u;
-    const bool     use_deflate = (compression_level >= 1 && compression_level <= 9);
-
-    TIFF* tif = TIFFOpen(path.c_str(), "w");
-    if (!tif) {
-        fprintf(stderr, "tiff_io::write_flat: cannot open '%s' for writing\n", path.c_str());
-        return false;
-    }
-
-    TIFFSetField(tif, TIFFTAG_IMAGEWIDTH,      w);
-    TIFFSetField(tif, TIFFTAG_IMAGELENGTH,     h);
-    TIFFSetField(tif, TIFFTAG_SAMPLESPERPIXEL, static_cast<uint16_t>(spp));
-    TIFFSetField(tif, TIFFTAG_BITSPERSAMPLE,   static_cast<uint16_t>(8));
-    TIFFSetField(tif, TIFFTAG_ORIENTATION,     ORIENTATION_TOPLEFT);
-    TIFFSetField(tif, TIFFTAG_PLANARCONFIG,    PLANARCONFIG_CONTIG);
-    TIFFSetField(tif, TIFFTAG_PHOTOMETRIC,     is_gray ? PHOTOMETRIC_MINISBLACK : PHOTOMETRIC_RGB);
-    TIFFSetField(tif, TIFFTAG_COMPRESSION,     use_deflate ? COMPRESSION_ADOBE_DEFLATE
-                                                           : COMPRESSION_NONE);
-    TIFFSetField(tif, TIFFTAG_ROWSPERSTRIP,    h);  // entire image = one strip
-
-    if (!is_gray) {
-        uint16_t extra_type = EXTRASAMPLE_UNASSALPHA;
-        TIFFSetField(tif, TIFFTAG_EXTRASAMPLES, static_cast<uint16_t>(1), &extra_type);
-    }
-
-    // Use the source buffer directly when no format conversion is needed,
-    // otherwise convert into a temporary buffer.
-    const bool needs_conversion = (is_gray != (img.format == PixelFormat::gray));
-    const size_t total_bytes = static_cast<size_t>(w) * h * spp;
-
-    std::vector<uint8_t> converted;
-    const uint8_t* src_ptr = nullptr;
-    if (needs_conversion) {
-        converted.resize(total_bytes);
-        convert_pixels(img, converted.data(), 0, 0, w, h, w, w, is_gray, spp);
-        src_ptr = converted.data();
-    } else {
-        src_ptr = img.pixels.data();
-    }
-
-    if (use_deflate) {
-        // Compress the entire image as one block.
-        const uLong raw_len = static_cast<uLong>(total_bytes);
-        std::vector<uint8_t> compressed(compressBound(raw_len));
-        uLongf comp_size = static_cast<uLongf>(compressed.size());
-        if (compress2(compressed.data(), &comp_size,
-                      src_ptr, raw_len, compression_level) != Z_OK) {
-            fprintf(stderr, "tiff_io::write_flat: compression failed\n");
-            TIFFClose(tif);
-            return false;
-        }
-        if (TIFFWriteRawStrip(tif, 0, compressed.data(),
-                              static_cast<tmsize_t>(comp_size)) < 0) {
-            fprintf(stderr, "tiff_io::write_flat: failed to write compressed data\n");
-            TIFFClose(tif);
-            return false;
-        }
-    } else {
-        if (TIFFWriteRawStrip(tif, 0, const_cast<uint8_t*>(src_ptr),
-                              static_cast<tmsize_t>(total_bytes)) < 0) {
-            fprintf(stderr, "tiff_io::write_flat: failed to write image data\n");
-            TIFFClose(tif);
-            return false;
-        }
-    }
-
-    TIFFClose(tif);
-    return true;
-}
 
 } // namespace tiff_io

@@ -47,13 +47,5 @@ IO_API bool read(const std::string& path, image_data& out,
 IO_API bool write(const std::string& path, const image_data& img,
                   const WriteOptions& opts = {});
 
-// Write image_data to a TIFF file without any strip/tile segmentation.
-// The entire image is written as a single strip (RowsPerStrip == image height).
-//   compression_level == 0: COMPRESSION_NONE (no compression at all)
-//   compression_level 1-9:  COMPRESSION_ADOBE_DEFLATE, full-image single block
-// Intended for performance benchmarking.  Returns true on success.
-IO_API bool write_flat(const std::string& path, const image_data& img,
-                       int compression_level = 0,
-                       PixelFormat output_format = PixelFormat::rgba);
 
 } // namespace tiff_io
