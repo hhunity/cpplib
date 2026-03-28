@@ -1,4 +1,4 @@
-add_library(db SHARED logger.cpp)
+add_library(db SHARED logger.cpp overlay_helper.cpp)
 
 target_compile_definitions(db PRIVATE DB_BUILD_DLL)
 
@@ -18,4 +18,7 @@ add_custom_command(TARGET db POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
         "${CMAKE_SOURCE_DIR}/db/logger.h"
         "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/include/db/logger.h"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        "${CMAKE_SOURCE_DIR}/db/overlay_helper.h"
+        "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/include/db/overlay_helper.h"
 )
