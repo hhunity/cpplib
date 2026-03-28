@@ -203,7 +203,7 @@ static void bench(int w, int h)
 
     // ---- Parallel tiled, level 1 (fastest) ----
     t0 = now_ms();
-    tiff_io::write("_par_l1.tiff", src, {.tile_size = 512, .compression_level = 1});
+    tiff_io::write("_par_l1.tiff", src, nullptr, {.tile_size = 512, .compression_level = 1});
     t1 = now_ms();
     const ms_t par_l1_write = t1 - t0;
 
@@ -216,7 +216,7 @@ static void bench(int w, int h)
 
     // ---- Parallel tiled, level 6 (default) ----
     t0 = now_ms();
-    tiff_io::write("_par_l6.tiff", src, {.tile_size = 512, .compression_level = 6});
+    tiff_io::write("_par_l6.tiff", src, nullptr, {.tile_size = 512, .compression_level = 6});
     t1 = now_ms();
     const ms_t par_l6_write = t1 - t0;
 

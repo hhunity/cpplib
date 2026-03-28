@@ -14,12 +14,7 @@ target_link_libraries(io
 add_custom_command(TARGET io POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E make_directory
         "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/include/io"
-    COMMAND ${CMAKE_COMMAND} -E make_directory
-        "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/include/util"
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
         "${CMAKE_SOURCE_DIR}/io/tiff_io.h"
         "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/include/io/tiff_io.h"
-    COMMAND ${CMAKE_COMMAND} -E copy_if_different
-        "${CMAKE_SOURCE_DIR}/util/image_data.h"
-        "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/include/util/image_data.h"
 )

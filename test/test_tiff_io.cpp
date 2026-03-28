@@ -14,14 +14,14 @@ static image_data make_gradient(int w, int h)
     image_data img;
     img.width  = w;
     img.height = h;
-    img.pixels.resize(static_cast<size_t>(w) * h * 4);
+    img.format = PixelFormat::rgb;
+    img.pixels.resize(static_cast<size_t>(w) * h * 3);
     for (int y = 0; y < h; ++y) {
         for (int x = 0; x < w; ++x) {
-            uint8_t* p = img.pixels.data() + (y * w + x) * 4;
+            uint8_t* p = img.pixels.data() + (y * w + x) * 3;
             p[0] = static_cast<uint8_t>(x & 0xFF);
             p[1] = static_cast<uint8_t>(y & 0xFF);
             p[2] = 128;
-            p[3] = 255;
         }
     }
     return img;
@@ -41,13 +41,16 @@ static bool run_test(const std::string& name,
     const std::string path = name + ".tiff";
     const image_data src = make_gradient(w, h);
 
-    if (!tiff_io::write(path, src, opts)) {
+    auto wopts = opts;
+    wopts.output_format = PixelFormat::rgb;
+
+    if (!tiff_io::write(path, src, nullptr, wopts)) {
         std::fprintf(stderr, "FAIL [%s] write error\n", name.c_str());
         return false;
     }
 
     image_data dst;
-    if (!tiff_io::read(path, dst)) {
+    if (!tiff_io::read(path, dst, nullptr, {.output_format = PixelFormat::rgb})) {
         std::fprintf(stderr, "FAIL [%s] read error\n", name.c_str());
         return false;
     }
@@ -74,13 +77,16 @@ static bool run_test_flat(const std::string& name, int w, int h, int level = 0)
         .compression_level = level,
         .rows_per_strip    = static_cast<uint32_t>(h),
     };
-    if (!tiff_io::write(path, src, opts)) {
+    auto wopts = opts;
+    wopts.output_format = PixelFormat::rgb;
+
+    if (!tiff_io::write(path, src, nullptr, wopts)) {
         std::fprintf(stderr, "FAIL [%s] write error\n", name.c_str());
         return false;
     }
 
     image_data dst;
-    if (!tiff_io::read(path, dst)) {
+    if (!tiff_io::read(path, dst, nullptr, {.output_format = PixelFormat::rgb})) {
         std::fprintf(stderr, "FAIL [%s] read error\n", name.c_str());
         return false;
     }
@@ -104,7 +110,9 @@ static void benchmark(int w, int h, const tiff_io::WriteOptions& opts)
     const image_data img = make_gradient(w, h);
 
     auto t0 = std::chrono::high_resolution_clock::now();
-    tiff_io::write("bench.tiff", img, opts);
+    auto wopts = opts;
+    wopts.output_format = PixelFormat::rgb;
+    tiff_io::write("bench.tiff", img, nullptr, wopts);
     auto t1 = std::chrono::high_resolution_clock::now();
 
     const double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
@@ -170,7 +178,9 @@ int main()
     benchmark(4096, 4096, {.tile_size = 256, .compression_level = 6});
     benchmark(4096, 4096, {.tile_size = 256, .compression_level = 9});
     benchmark(4096, 4096, {.tile_size = 512, .compression_level = 6});
-    benchmark_flat(4096, 4096, 0);  // no compression, baseline
+    benchmark(4096, 4096, {.tile_size = 512, .compression_level = 6});
+    benchmark(4096, 4096, {.tile_size = 512, .compression_level = 6 ,.output_format = PixelFormat::gray  });
+    // benchmark_flat(4096, 4096, 0);  // no compression, baseline
     benchmark_flat(4096, 4096, 6);  // deflate level 6, single block
 
     return failed == 0 ? 0 : 1;
