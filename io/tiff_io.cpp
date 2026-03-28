@@ -418,9 +418,26 @@ bool write(const std::string& path, const image_data& img,
     TIFFSetField(tif, TIFFTAG_PLANARCONFIG,    PLANARCONFIG_CONTIG);
     TIFFSetField(tif, TIFFTAG_PHOTOMETRIC,     (dst_fmt == PixelFormat::gray)
                                                    ? PHOTOMETRIC_MINISBLACK : PHOTOMETRIC_RGB);
-    TIFFSetField(tif, TIFFTAG_COMPRESSION,     opts.compression_level > 0
-                                                   ? COMPRESSION_ADOBE_DEFLATE
-                                                   : COMPRESSION_NONE);
+
+    uint16_t compression_tag = COMPRESSION_NONE;
+    switch (opts.compression) {
+        case WriteOptions::Compression::none:     compression_tag = COMPRESSION_NONE; break;
+        case WriteOptions::Compression::deflate:  compression_tag = COMPRESSION_ADOBE_DEFLATE; break;
+        case WriteOptions::Compression::lzw:      compression_tag = COMPRESSION_LZW; break;
+        case WriteOptions::Compression::packbits: compression_tag = COMPRESSION_PACKBITS; break;
+        case WriteOptions::Compression::zstd:
+#ifdef COMPRESSION_ZSTD
+            compression_tag = COMPRESSION_ZSTD;
+#else
+            compression_tag = COMPRESSION_ADOBE_DEFLATE; // fallback if zstd is unavailable
+#endif
+            break;
+    }
+    TIFFSetField(tif, TIFFTAG_COMPRESSION, compression_tag);
+    if (opts.compression == WriteOptions::Compression::deflate) {
+        const int lvl = std::clamp(opts.compression_level, 0, 9);
+        TIFFSetField(tif, TIFFTAG_ZIPQUALITY, static_cast<uint16_t>(lvl));
+    }
 
     if (dst_fmt == PixelFormat::rgba) {
         uint16_t extra_type = EXTRASAMPLE_UNASSALPHA;
@@ -435,6 +452,8 @@ bool write(const std::string& path, const image_data& img,
     };
 
     std::atomic<bool> had_error{false};
+    const bool manual_deflate = (opts.compression == WriteOptions::Compression::deflate &&
+                                 opts.compression_level > 0);
 
     if (ts > 0) {
         // ----------------------------------------------------------------
@@ -447,8 +466,8 @@ bool write(const std::string& path, const image_data& img,
         const uint32_t tiles_y = (h + ts - 1) / ts;
         const uint32_t ntiles  = tiles_x * tiles_y;
 
-        if (opts.compression_level == 0) {
-            // No compression: convert and write serially — no segs copy needed.
+        if (!manual_deflate) {
+            // Use libtiff's encoded path (includes none/LZW/PackBits/ZSTD or deflate level 0).
             std::vector<uint8_t> raw(static_cast<size_t>(ts) * ts * spp);
             for (uint32_t t = 0; t < ntiles; ++t) {
                 const uint32_t tx     = (t % tiles_x) * ts;
@@ -458,8 +477,8 @@ bool write(const std::string& path, const image_data& img,
                 // ①: zero-pad only edge tiles
                 if (copy_w < ts || copy_h < ts) std::fill(raw.begin(), raw.end(), 0);
                 convert_pixels(img, tx, ty, copy_w, copy_h, w, ts, dst_fmt, raw.data());
-                if (TIFFWriteRawTile(tif, t, raw.data(),
-                                     static_cast<tmsize_t>(raw.size())) < 0) {
+                if (TIFFWriteEncodedTile(tif, t, raw.data(),
+                                         static_cast<tmsize_t>(raw.size())) < 0) {
                     fprintf(stderr, "tiff_io::write: failed to write tile %u\n", t);
                     TIFFClose(tif);
                     return false;
@@ -467,7 +486,7 @@ bool write(const std::string& path, const image_data& img,
                 if (progress) progress->store(static_cast<float>(t + 1) / ntiles);
             }
         } else {
-            // Parallel compress, serial write.
+            // Manual deflate: parallel compress, serial write (zlib).
             const int nthreads = worker_count(ntiles, opts.max_threads);
             std::vector<SegBuf> segs(ntiles);
 
@@ -521,8 +540,8 @@ bool write(const std::string& path, const image_data& img,
 
         const bool needs_conversion = (img.format != dst_fmt);
 
-        if (opts.compression_level == 0) {
-            // No compression: write directly — no segs copy needed.
+        if (!manual_deflate) {
+            // Use libtiff's encoded path (includes none/LZW/PackBits/ZSTD or deflate level 0).
             std::vector<uint8_t> converted;
             if (needs_conversion)
                 converted.resize(static_cast<size_t>(w) * rps * spp);
@@ -540,8 +559,8 @@ bool write(const std::string& path, const image_data& img,
                     src_ptr = img.pixels.data() + static_cast<size_t>(row0) * w * spp;
                 }
 
-                if (TIFFWriteRawStrip(tif, s, const_cast<uint8_t*>(src_ptr),
-                                      static_cast<tmsize_t>(raw_len)) < 0) {
+                if (TIFFWriteEncodedStrip(tif, s, const_cast<uint8_t*>(src_ptr),
+                                          static_cast<tmsize_t>(raw_len)) < 0) {
                     fprintf(stderr, "tiff_io::write: failed to write strip %u\n", s);
                     TIFFClose(tif);
                     return false;
@@ -549,7 +568,7 @@ bool write(const std::string& path, const image_data& img,
                 if (progress) progress->store(static_cast<float>(s + 1) / nstrips);
             }
         } else {
-            // Parallel compress, serial write.
+            // Manual deflate: parallel compress, serial write (zlib).
             const int nthreads = worker_count(nstrips, opts.max_threads);
             std::vector<SegBuf> segs(nstrips);
 

@@ -48,7 +48,9 @@ namespace tiff_io {
 struct WriteOptions
 {
     uint32_t    tile_size         = 512;               // tile width/height in pixels (must be a multiple of 16); 0 = strip layout
-    int         compression_level = 6;                 // zlib level: 1 = fastest, 9 = best ratio, 0 = none
+    // Compression scheme
+    enum class Compression { none, deflate, lzw, packbits, zstd } compression = Compression::deflate;
+    int         compression_level = 6;                 // zlib/zstd level: 1 = fastest, 9 = best ratio, 0 = none (when compression==deflate)
     PixelFormat output_format     = PixelFormat::rgb;  // output pixel format
     int         max_threads       = 0;                 // 0 = hardware concurrency (no cap); positive = explicit limit
     uint32_t    rows_per_strip    = 64;                // rows per strip when tile_size == 0
