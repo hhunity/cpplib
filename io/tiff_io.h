@@ -1,4 +1,5 @@
 #pragma once
+#include <array>
 #include <atomic>
 #include <cstdint>
 #include <memory>
@@ -37,6 +38,20 @@ struct image_data
             case PixelFormat::gray: return 1;
         }
         return 4;
+    }
+
+    // Returns the RGBA value at (x, y), or {0,0,0,0} if out of bounds.
+    // Note: only meaningful when format == PixelFormat::rgba.
+    std::array<uint8_t, 4> pixel_at(int x, int y) const {
+        if (x < 0 || x >= width || y < 0 || y >= height)
+            return {0, 0, 0, 0};
+        const int    ch  = channels();
+        const size_t idx = (static_cast<size_t>(y) * width + x) * ch;
+        const uint8_t r = pixels[idx];
+        const uint8_t g = ch > 1 ? pixels[idx + 1] : r;
+        const uint8_t b = ch > 2 ? pixels[idx + 2] : r;
+        const uint8_t a = ch > 3 ? pixels[idx + 3] : 255;
+        return {r, g, b, a};
     }
 };
 
